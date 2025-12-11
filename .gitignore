@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files (因為太大，忽略資料夾內所有檔案)
+data/raw/*
+data/processed/*
+# 但是保留資料夾結構 (這就是驚嘆號的作用)
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Model weights (忽略各種模型權重檔)
+models/**/*.pth
+models/**/*.pt
+models/**/*.h5
+# 保留資料夾結構
+!models/.gitkeep
+
+# Results
+results/counterfactuals/*
+!results/counterfactuals/.gitkeep
+
+# IDE Settings (每個人的編輯器設定不同，不用上傳)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
