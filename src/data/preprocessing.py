@@ -1,17 +1,54 @@
 """
-資料前處理模組
-包含影像載入、CLAHE 增強、Resize、歸一化等功能
+資料前處理模組 (v2.0 - 包含平衡機制與自動記錄)
+功能：
+1. 影像檢查與路徑對應
+2. 解決類別不平衡 (Undersampling)
+3. 劃分 Train/Val/Test
+4. 定義影像增強與標準化流程
 """
 
 import cv2
+import sys
+import datetime
 import numpy as np
+import pandas as pd
 from PIL import Image
 from pathlib import Path
 from typing import Tuple, Optional
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
+# ---------------------------------------------------------
+# 1. 工具類別：自動記錄器 (跟之前一樣)
+# ---------------------------------------------------------
+class DualLogger:
+    def __init__(self, filename, original_stdout):
+        self.terminal = original_stdout
+        self.log = open(filename, "w", encoding='utf-8-sig')
 
+    def write(self, message):
+        try:
+            if message:
+                self.terminal.write(message)
+                self.terminal.flush()
+        except Exception:
+            sys.__stderr__.write(message)
+        try:
+            self.log.write(message)
+            self.log.flush()
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.terminal.flush()
+            self.log.flush()
+        except:
+            pass
+
+# ---------------------------------------------------------
+# 2. 核心類別：影像前處理器
+# ---------------------------------------------------------
 class ImagePreprocessor:
     """影像前處理器"""
     
@@ -19,34 +56,17 @@ class ImagePreprocessor:
                  target_size: Tuple[int, int] = (512, 512),
                  apply_clahe: bool = True,
                  normalize: bool = True):
-        """
-        初始化前處理器
-        
-        Args:
-            target_size: 目標影像大小 (H, W)
-            apply_clahe: 是否應用 CLAHE
-            normalize: 是否歸一化至 [0, 1]
-        """
         self.target_size = target_size
         self.apply_clahe = apply_clahe
         self.normalize = normalize
         
-        # 建立 CLAHE 物件
+        # 建立 CLAHE 物件 (對比度限制自適應直方圖均衡化)
         if apply_clahe:
             self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     
     def load_image(self, image_path: Path) -> np.ndarray:
-        """
-        載入影像
-        
-        Args:
-            image_path: 影像路徑
-        
-        Returns:
-            灰階影像陣列 (H, W)
-        """
         try:
-            # 使用 PIL 載入
+            # 使用 PIL 載入並轉灰階
             img = Image.open(image_path).convert('L')
             img_array = np.array(img)
             return img_array
@@ -54,19 +74,9 @@ class ImagePreprocessor:
             raise ValueError(f"無法載入影像 {image_path}: {e}")
     
     def apply_clahe_enhancement(self, image: np.ndarray) -> np.ndarray:
-        """
-        應用 CLAHE 對比度增強
-        
-        Args:
-            image: 輸入影像 (H, W)
-        
-        Returns:
-            增強後的影像 (H, W)
-        """
         if not self.apply_clahe:
             return image
         
-        # 確保為 uint8 格式
         if image.dtype != np.uint8:
             image = self._to_uint8(image)
         
@@ -74,190 +84,143 @@ class ImagePreprocessor:
         return enhanced
     
     def resize_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        調整影像大小
-        
-        Args:
-            image: 輸入影像 (H, W)
-        
-        Returns:
-            調整後的影像 (target_H, target_W)
-        """
         resized = cv2.resize(image, 
                            (self.target_size[1], self.target_size[0]),
                            interpolation=cv2.INTER_AREA)
         return resized
     
     def normalize_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        歸一化影像至 [0, 1]
-        
-        Args:
-            image: 輸入影像 (H, W)
-        
-        Returns:
-            歸一化後的影像 (H, W)
-        """
         if not self.normalize:
             return image
         
-        # 轉換為 float32
         image = image.astype(np.float32)
-        
-        # 歸一化至 [0, 1]
-        image = image / 255.0
-        
+        image = image / 255.0 # 歸一化至 [0, 1]
         return image
     
     def preprocess(self, image_path: Path) -> np.ndarray:
-        """
-        完整前處理流程
-        
-        Args:
-            image_path: 影像路徑
-        
-        Returns:
-            前處理後的影像 (H, W) 或 (H, W, 1)
-        """
-        # 1. 載入影像
+        """完整前處理流程"""
         image = self.load_image(image_path)
-        
-        # 2. CLAHE 增強
         image = self.apply_clahe_enhancement(image)
-        
-        # 3. Resize
         image = self.resize_image(image)
-        
-        # 4. 歸一化
         image = self.normalize_image(image)
-        
         return image
     
     def _to_uint8(self, image: np.ndarray) -> np.ndarray:
-        """轉換為 uint8 格式"""
         if image.max() <= 1.0:
             image = image * 255.0
         return image.astype(np.uint8)
 
-
+# ---------------------------------------------------------
+# 3. 核心類別：資料增強器
+# ---------------------------------------------------------
 class DataAugmentor:
-    """資料增強器（僅用於訓練集）"""
+    """資料增強器（用於訓練時增加數據多樣性）"""
     
     def __init__(self, image_size: Tuple[int, int] = (512, 512)):
-        """
-        初始化增強器
-        
-        Args:
-            image_size: 影像大小 (H, W)
-        """
         self.image_size = image_size
         
-        # 定義訓練時的增強
+        # 訓練增強策略
         self.train_transform = A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=0.05,
-                scale_limit=0.1,
-                rotate_limit=10,
-                p=0.5
-            ),
-            A.RandomBrightnessContrast(
-                brightness_limit=0.1,
-                contrast_limit=0.1,
-                p=0.5
-            ),
-            A.GaussNoise(var_limit=(10.0, 30.0), p=0.3),
-            A.Normalize(mean=(0.5,), std=(0.5,)),
+            A.HorizontalFlip(p=0.5), # 水平翻轉
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, p=0.5), # 旋轉縮放
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.5), # 亮度對比
+            A.GaussNoise(var_limit=(10.0, 30.0), p=0.3), # 高斯雜訊
+            A.Normalize(mean=(0.5,), std=(0.5,)), # 標準化 (轉成 -1 ~ 1)
             ToTensorV2()
         ])
         
-        # 定義驗證/測試時的增強（無隨機性）
+        # 驗證/測試策略 (只做標準化)
         self.val_transform = A.Compose([
             A.Normalize(mean=(0.5,), std=(0.5,)),
             ToTensorV2()
         ])
-    
-    def apply_train_augmentation(self, image: np.ndarray) -> np.ndarray:
-        """
-        應用訓練時增強
-        
-        Args:
-            image: 輸入影像 (H, W) 或 (H, W, 1)
-        
-        Returns:
-            增強後的影像 tensor (1, H, W)
-        """
-        # 確保為 3D 陣列
-        if image.ndim == 2:
-            image = np.expand_dims(image, axis=-1)
-        
-        # 應用增強
-        augmented = self.train_transform(image=image)
-        return augmented['image']
-    
-    def apply_val_augmentation(self, image: np.ndarray) -> np.ndarray:
-        """
-        應用驗證/測試時增強
-        
-        Args:
-            image: 輸入影像 (H, W) 或 (H, W, 1)
-        
-        Returns:
-            增強後的影像 tensor (1, H, W)
-        """
-        # 確保為 3D 陣列
-        if image.ndim == 2:
-            image = np.expand_dims(image, axis=-1)
-        
-        # 應用增強
-        augmented = self.val_transform(image=image)
-        return augmented['image']
 
+# ---------------------------------------------------------
+# 4. 功能函式：平衡、檢查、分割
+# ---------------------------------------------------------
+def check_image_exists(df_labels, images_dir: Path) -> pd.DataFrame:
+    """檢查影像檔案是否存在，並建立完整路徑"""
+    print(f"🔍 檢查影像檔案是否存在於: {images_dir}")
+    
+    # 建立 filename -> full_path 的映射字典，加快搜尋速度
+    # 假設所有圖片都在 images_dir 或是其子資料夾內
+    all_image_paths = {p.name: p for p in images_dir.glob("**/*.png")}
+    
+    valid_indices = []
+    full_paths = []
+    missing_count = 0
+    
+    for idx, row in df_labels.iterrows():
+        img_name = row['image_id']
+        
+        if img_name in all_image_paths:
+            valid_indices.append(idx)
+            full_paths.append(str(all_image_paths[img_name]))
+        else:
+            missing_count += 1
+            # print(f"  Missing: {img_name}") # 除錯用
+    
+    df_filtered = df_labels.loc[valid_indices].reset_index(drop=True)
+    df_filtered['image_path'] = full_paths # 新增一欄完整路徑
+    
+    print(f"✅ 有效影像: {len(df_filtered)}")
+    if missing_count > 0:
+        print(f"⚠️ 缺失影像: {missing_count} (已過濾)")
+    
+    return df_filtered
 
-def split_dataset(df_labels, 
-                 train_ratio: float = 0.7,
-                 val_ratio: float = 0.15,
-                 test_ratio: float = 0.15,
-                 random_state: int = 42) -> Tuple:
+def balance_dataset(df_labels, target_ratio: float = 1.0, random_state: int = 42) -> pd.DataFrame:
     """
-    劃分資料集（患者層級）
+    平衡資料集 (欠取樣 Normal 類別)
+    
     
     Args:
-        df_labels: 標籤 DataFrame（需包含 'image_id' 和 'report_id'）
-        train_ratio: 訓練集比例
-        val_ratio: 驗證集比例
-        test_ratio: 測試集比例
-        random_state: 隨機種子
-    
-    Returns:
-        (train_df, val_df, test_df) 三個 DataFrame
+        target_ratio: 正負樣本比例 (1.0 代表 1:1, 2.0 代表 1:2)
     """
-    import numpy as np
-    from sklearn.model_selection import train_test_split
+    print("\n⚖️ 執行資料集平衡 (Undersampling)...")
     
-    # 驗證比例
-    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
-        "比例總和必須為 1.0"
+    # 分離正負樣本
+    pos_df = df_labels[df_labels['label'] == 1]
+    neg_df = df_labels[df_labels['label'] == 0]
+    
+    n_pos = len(pos_df)
+    n_neg = len(neg_df)
+    
+    print(f"  原始分布 - Positive: {n_pos}, Negative: {n_neg}")
+    
+    # 計算目標負樣本數量 (例如正樣本 200，target_ratio=2 -> 負樣本取 400)
+    n_neg_target = int(n_pos * target_ratio)
+    
+    if n_neg > n_neg_target:
+        # 隨機抽取負樣本
+        neg_sampled = neg_df.sample(n=n_neg_target, random_state=random_state)
+        print(f"  隨機抽取 {n_neg_target} 個 Negative 樣本 (比例 1:{target_ratio})")
+    else:
+        neg_sampled = neg_df
+        print("  Negative 樣本數不足，保留所有樣本")
+        
+    # 合併並打亂
+    df_balanced = pd.concat([pos_df, neg_sampled]).sample(frac=1, random_state=random_state).reset_index(drop=True)
+    
+    print(f"✅ 平衡後總數: {len(df_balanced)} (Pos: {len(pos_df)}, Neg: {len(neg_sampled)})")
+    return df_balanced
+
+def split_dataset(df_labels, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
+    """劃分資料集（確保同一病人的影像都在同一組）"""
+    from sklearn.model_selection import train_test_split
     
     # 提取唯一的 report_id（代表患者）
     unique_reports = df_labels['report_id'].unique()
     
-    print(f"總共 {len(unique_reports)} 個唯一報告（患者）")
-    print(f"總共 {len(df_labels)} 張影像")
-    
     # 第一次分割：分出訓練集
     train_reports, temp_reports = train_test_split(
-        unique_reports,
-        test_size=(1 - train_ratio),
-        random_state=random_state
+        unique_reports, test_size=(1 - train_ratio), random_state=random_state
     )
     
     # 第二次分割：分出驗證集與測試集
-    val_size = val_ratio / (val_ratio + test_ratio)
+    val_size_adjusted = val_ratio / (val_ratio + test_ratio)
     val_reports, test_reports = train_test_split(
-        temp_reports,
-        test_size=(1 - val_size),
-        random_state=random_state
+        temp_reports, test_size=(1 - val_size_adjusted), random_state=random_state
     )
     
     # 根據 report_id 篩選影像
@@ -265,85 +228,79 @@ def split_dataset(df_labels,
     val_df = df_labels[df_labels['report_id'].isin(val_reports)].reset_index(drop=True)
     test_df = df_labels[df_labels['report_id'].isin(test_reports)].reset_index(drop=True)
     
-    # 統計
-    print(f"\n資料集劃分結果：")
-    print(f"  訓練集: {len(train_df)} 張影像 ({len(train_reports)} 個報告)")
-    print(f"  驗證集: {len(val_df)} 張影像 ({len(val_reports)} 個報告)")
-    print(f"  測試集: {len(test_df)} 張影像 ({len(test_reports)} 個報告)")
-    
-    # 檢查類別分布
-    print(f"\n類別分布：")
-    for split_name, split_df in [('訓練集', train_df), ('驗證集', val_df), ('測試集', test_df)]:
-        pos_count = (split_df['label'] == 1).sum()
-        neg_count = (split_df['label'] == 0).sum()
-        print(f"  {split_name}: 正例 {pos_count} ({pos_count/len(split_df)*100:.1f}%), "
-              f"負例 {neg_count} ({neg_count/len(split_df)*100:.1f}%)")
+    print(f"\n📊 資料集劃分完成:")
+    print(f"  Train: {len(train_df)} ({len(train_reports)} reports)")
+    print(f"  Val  : {len(val_df)} ({len(val_reports)} reports)")
+    print(f"  Test : {len(test_df)} ({len(test_reports)} reports)")
     
     return train_df, val_df, test_df
 
-
-def check_image_exists(df_labels, images_dir: Path) -> pd.DataFrame:
-    """
-    檢查影像檔案是否存在，過濾掉不存在的樣本
-    
-    Args:
-        df_labels: 標籤 DataFrame
-        images_dir: 影像目錄
-    
-    Returns:
-        過濾後的 DataFrame
-    """
-    print(f"檢查影像檔案是否存在...")
-    
-    valid_indices = []
-    missing_count = 0
-    
-    for idx, row in df_labels.iterrows():
-        # 嘗試多種可能的檔案路徑格式
-        possible_paths = [
-            images_dir / f"{row['image_id']}.png",
-            images_dir / row['image_id'],
-            images_dir / f"{row['image_id']}.jpg",
-        ]
-        
-        exists = any(p.exists() for p in possible_paths)
-        
-        if exists:
-            valid_indices.append(idx)
-        else:
-            missing_count += 1
-    
-    df_filtered = df_labels.loc[valid_indices].reset_index(drop=True)
-    
-    print(f"✅ 有效影像: {len(df_filtered)}")
-    print(f"⚠️ 缺失影像: {missing_count}")
-    
-    return df_filtered
-
-
+# ---------------------------------------------------------
+# 5. 主程式
+# ---------------------------------------------------------
 def main():
-    """測試腳本"""
-    from pathlib import Path
-    
-    # 設定路徑
-    PROJECT_ROOT = Path(__file__).parent.parent.parent
-    IMAGE_PATH = PROJECT_ROOT / "data" / "raw" / "images" / "sample.png"
-    
-    # 建立前處理器
-    preprocessor = ImagePreprocessor(
-        target_size=(512, 512),
-        apply_clahe=True,
-        normalize=True
-    )
-    
-    # 測試前處理
-    if IMAGE_PATH.exists():
-        processed = preprocessor.preprocess(IMAGE_PATH)
-        print(f"前處理完成: {processed.shape}, dtype: {processed.dtype}")
-        print(f"像素值範圍: [{processed.min():.3f}, {processed.max():.3f}]")
-    else:
-        print(f"測試影像不存在: {IMAGE_PATH}")
+    # --- 路徑設定 ---
+    try:
+        script_path = Path(__file__).resolve()
+        project_root = script_path.parents[2]
+    except NameError:
+        project_root = Path.cwd()
+        if (project_root / "src").exists(): project_root = project_root
+        elif (project_root.parent / "src").exists(): project_root = project_root.parent
 
+    # 設定 Log
+    LOGS_DIR = project_root / "results" / "logs"
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    sys.stdout = DualLogger(LOGS_DIR / f"preprocessing_log_{timestamp}.txt", sys.stdout)
+
+    print("="*60)
+    print(f"🚀 資料前處理程序啟動 - {timestamp}")
+    print("="*60)
+
+    # 檔案路徑
+    LABELS_PATH = project_root / "data" / "labels" / "binary_labels_cardiomegaly.csv"
+    IMAGES_DIR = project_root / "data" / "raw" / "images"
+    PROCESSED_DATA_DIR = project_root / "data" / "processed"
+    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1. 讀取標籤
+    if not LABELS_PATH.exists():
+        print(f"❌ 找不到標籤檔: {LABELS_PATH}")
+        return
+    df = pd.read_csv(LABELS_PATH)
+    print(f"📖 讀取標籤檔: {len(df)} 筆資料")
+
+    # 2. 檢查影像存在性
+    df = check_image_exists(df, IMAGES_DIR)
+
+    # 3. 資料集平衡 (設定 1:1 或 1:2)
+    # 建議設為 1.0 (1:1) 或 2.0 (1:2)，避免正常樣本過多
+    df_balanced = balance_dataset(df, target_ratio=1.5, random_state=42)
+
+    # 4. 資料集劃分
+    train_df, val_df, test_df = split_dataset(df_balanced)
+
+    # 5. 儲存分割後的 CSV
+    train_df.to_csv(PROCESSED_DATA_DIR / "train.csv", index=False)
+    val_df.to_csv(PROCESSED_DATA_DIR / "val.csv", index=False)
+    test_df.to_csv(PROCESSED_DATA_DIR / "test.csv", index=False)
+    print(f"\n💾 分割檔案已儲存至: {PROCESSED_DATA_DIR}")
+
+    # 6. (選用) 測試前處理器
+    print("\n🧪 測試影像前處理器...")
+    try:
+        sample_path = Path(train_df.iloc[0]['image_path'])
+        preprocessor = ImagePreprocessor()
+        processed_img = preprocessor.preprocess(sample_path)
+        print(f"  測試成功! 影像: {sample_path.name}")
+        print(f"  處理後尺寸: {processed_img.shape}, 範圍: {processed_img.min():.2f}~{processed_img.max():.2f}")
+    except Exception as e:
+        print(f"  測試失敗: {e}")
+
+    print("\n" + "="*60)
+    print("🎉 資料前處理完成！請執行 git commit 記錄進度。")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
