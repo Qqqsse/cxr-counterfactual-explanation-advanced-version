@@ -205,7 +205,7 @@ class ResidualGenerator(nn.Module):
         
         # 學習一個可訓練的縮放因子，初始值設很小 (0.01)
         # 這樣剛開始訓練時，輸出會非常接近原圖，容易訓練
-        self.scale = nn.Parameter(torch.tensor(0.01))
+        self.scale = nn.Parameter(torch.tensor(0.1))
         
         print("✅ 殘差生成器初始化完成 (Output = Input + Scale * Residual)")
     
