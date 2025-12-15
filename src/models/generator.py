@@ -84,17 +84,29 @@ class UNetGenerator(nn.Module):
         # 瓶頸層 (Bottleneck)
         self.bottleneck = self._conv_block(base_features * 8, base_features * 16)
         
-        # 解碼器 (Upsampling)
-        self.upconv4 = nn.ConvTranspose2d(base_features * 16, base_features * 8, kernel_size=2, stride=2)
-        self.dec4 = self._conv_block(base_features * 16, base_features * 8) # concat 後通道數翻倍
+        # 解碼器 (Upsampling) - [修改] 改用 Upsample + Conv 以消除棋盤格效應
+        self.upconv4 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(base_features * 16, base_features * 8, kernel_size=3, padding=1)
+        )
+        self.dec4 = self._conv_block(base_features * 16, base_features * 8) 
         
-        self.upconv3 = nn.ConvTranspose2d(base_features * 8, base_features * 4, kernel_size=2, stride=2)
+        self.upconv3 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(base_features * 8, base_features * 4, kernel_size=3, padding=1)
+        )
         self.dec3 = self._conv_block(base_features * 8, base_features * 4)
         
-        self.upconv2 = nn.ConvTranspose2d(base_features * 4, base_features * 2, kernel_size=2, stride=2)
+        self.upconv2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(base_features * 4, base_features * 2, kernel_size=3, padding=1)
+        )
         self.dec2 = self._conv_block(base_features * 4, base_features * 2)
         
-        self.upconv1 = nn.ConvTranspose2d(base_features * 2, base_features, kernel_size=2, stride=2)
+        self.upconv1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(base_features * 2, base_features, kernel_size=3, padding=1)
+        )
         self.dec1 = self._conv_block(base_features * 2, base_features)
         
         # 輸出層
